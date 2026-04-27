@@ -12,7 +12,7 @@ ESP-teplomer-Dousa
 
 LCD displej (QAPASS I2C):
 
-GND → GND
-VCC → 5V (nebo 3.3V)
-SDA → GPIO 21
-SCL → GPIO 22
+GND → GND    
+VCC → 5V (nebo 3.3V)    
+SDA → GPIO 21    
+SCL → GPIO 22    
