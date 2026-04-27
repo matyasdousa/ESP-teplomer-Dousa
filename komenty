@@ -1,0 +1,170 @@
+#include <Wire.h>               // I2C komunikace pro LCD
+#include <LiquidCrystal_I2C.h> // Knihovna pro LCD displej
+#include <OneWire.h>            // OneWire protokol pro teplotni cidlo
+#include <DallasTemperature.h>  // Knihovna pro DS18B20
+#include <WiFi.h>               // WiFi knihovna pro ESP32
+#include <WebServer.h>          // Webovy server
+#include <esp_wifi.h>           // ESP-IDF WiFi funkce pro nastaveni IP
+
+// Pin na kterem je zapojen datovy vyvod teplotniho cidla (zluta)
+#define ONE_WIRE_BUS 4
+
+// Inicializace OneWire a teplotniho cidla
+OneWire oneWire(ONE_WIRE_BUS);
+DallasTemperature sensors(&oneWire);
+
+// Inicializace LCD - adresa 0x27, 16 znaku, 2 radky
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+// Webovy server na portu 80 (standardni HTTP)
+WebServer server(80);
+
+// Nazev WiFi site - bez hesla, otevrena sit
+const char* ssid = "teplotni_cidlo_DOUSA";
+
+// Globalni promenna pro aktualni teplotu
+float teplota = 0.0;
+
+// Cas posledniho vypisu IP do serialoveho monitoru
+unsigned long posledniVypis = 0;
+
+// Nastaveni pevne IP adresy pro AP pomoci ESP-IDF funkci
+// Arduino funkce softAPConfig je nespolehliava, proto pouzivame nizsi vrstvu
+void nastavIP() {
+  // Ziskame handle na AP rozhrani
+  esp_netif_t* ap_netif = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
+  if (ap_netif == NULL) return;
+
+  // Nastavime IP, gateway a masku site
+  esp_netif_ip_info_t ip_info;
+  IP4_ADDR(&ip_info.ip,      192, 168, 67, 67); // IP adresa ESP32
+  IP4_ADDR(&ip_info.gw,      192, 168, 67,  1); // Gateway
+  IP4_ADDR(&ip_info.netmask, 255, 255, 255,  0); // Maska site
+
+  // Zastavime DHCP, nastavime IP, znovu spustime DHCP
+  esp_netif_dhcps_stop(ap_netif);
+  esp_netif_set_ip_info(ap_netif, &ip_info);
+  esp_netif_dhcps_start(ap_netif);
+}
+
+// Vlastni znak stupne pro LCD (LCD nema v zakladni sade znak °)
+byte stupen[8] = {
+  0b00110,
+  0b01001,
+  0b01001,
+  0b00110,
+  0b00000,
+  0b00000,
+  0b00000,
+  0b00000
+};
+
+// Funkce ktera se zavola kdyz nekdo navstivi IP adresu v prohlizeci
+void handleRoot() {
+  // Sestavime HTML stranku s aktualni teplotou
+  String html = "<!DOCTYPE html><html><head>";
+  html += "<meta charset='UTF-8'>";
+  html += "<meta http-equiv='refresh' content='2'>"; // Automaticke obnoveni kazdé 2s
+  html += "<title>Teplota</title>";
+  html += "<style>";
+  html += "* { margin: 0; padding: 0; box-sizing: border-box; }";
+  html += "body { background: #000; display: flex; justify-content: center; align-items: center; height: 100vh; font-family: Arial, sans-serif; }";
+  html += ".teplota { font-size: 20vw; color: #fff; font-weight: bold; }"; // Velke bile cislo uprostred
+  html += "</style></head><body>";
+  html += "<div class='teplota'>" + String(teplota, 1) + "&deg;C</div>"; // Aktualni teplota
+  html += "</body></html>";
+  server.send(200, "text/html", html);
+}
+
+void setup() {
+  Serial.begin(115200); // Spusteni serialove komunikace
+
+  sensors.begin(); // Inicializace teplotniho cidla
+
+  // Inicializace LCD
+  lcd.init();
+  lcd.backlight();                // Zapnuti podsviceni
+  lcd.createChar(0, stupen);     // Ulozeni vlastniho znaku stupne na pozici 0
+  lcd.setCursor(0, 0);
+  lcd.print("Spoustim AP...");   // Uvodni zprava
+
+  // Nastaveni WiFi rezimu
+  WiFi.persistent(false);        // Neukladat WiFi konfiguraci do flash pameti
+  WiFi.mode(WIFI_AP);            // Rezim pristupoveho bodu
+
+  // Vypnout uspory energie - ESP32 bude reagovat okamzite
+  esp_wifi_set_ps(WIFI_PS_NONE);
+
+  // Konfigurace AP pomoci ESP-IDF
+  wifi_ap_config_t ap_config = {};
+  memcpy(ap_config.ssid, ssid, strlen(ssid));
+  ap_config.ssid_len = strlen(ssid);
+  ap_config.channel = 6;                    // WiFi kanal 6
+  ap_config.authmode = WIFI_AUTH_OPEN;      // Otevrena sit bez hesla
+  ap_config.max_connection = 4;             // Max 4 zarizeni najednou
+  ap_config.beacon_interval = 50;           // Beacon kazdych 50ms (rychlejsi nez default 100ms)
+  esp_wifi_set_config(WIFI_IF_AP, (wifi_config_t*)&ap_config);
+
+  // Spusteni AP
+  WiFi.softAP(ssid);
+  delay(300);
+
+  // Nastaveni pevne IP adresy
+  nastavIP();
+
+  // Vypis info do serialoveho monitoru
+  Serial.println("AP spusteno");
+  Serial.print("SSID: ");
+  Serial.println(ssid);
+  Serial.print("IP adresa: ");
+  Serial.println(WiFi.softAPIP());
+
+  // Registrace URL a spusteni weboveho serveru
+  server.on("/", handleRoot);
+  server.begin();
+  Serial.println("Web server spusten");
+
+  // Zobrazeni IP na LCD po dobu 3 sekund
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("IP:");
+  lcd.setCursor(0, 1);
+  lcd.print(WiFi.softAPIP());
+  delay(3000);
+}
+
+void loop() {
+  // Pozadavek na namereni teploty
+  sensors.requestTemperatures();
+  teplota = sensors.getTempCByIndex(0); // Ziskani teploty prvniho cidla
+
+  // Pokud neni nikdo pripojeny, kazdych 10 sekund vypis IP do serialu
+  if (WiFi.softAPgetStationNum() == 0) {
+    if (millis() - posledniVypis >= 10000) {
+      Serial.print("Cekam na pripojeni... IP: ");
+      Serial.println(WiFi.softAPIP());
+      posledniVypis = millis();
+    }
+  }
+
+  // Vypis teploty do serialoveho monitoru
+  Serial.print("Teplota: ");
+  Serial.print(teplota, 1);
+  Serial.print("\xC2\xB0"); // Znak stupne v UTF-8
+  Serial.println("C");
+
+  // LCD radek 1 - popisek
+  lcd.setCursor(0, 0);
+  lcd.print("Teplota:        ");
+
+  // LCD radek 2 - hodnota s 2 desetinnymi misty a znakem stupne
+  lcd.setCursor(0, 1);
+  lcd.print(teplota, 2);
+  lcd.write(byte(0)); // Vlastni znak stupne
+  lcd.print("C       ");
+
+  // Obsluha HTTP pozadavku
+  server.handleClient();
+
+  delay(1000); // Pauza 1 sekunda mezi merenima
+}
