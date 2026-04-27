@@ -6,7 +6,7 @@ ESP-teplomer-Dousa
 
 ČIDLO
 
-Černá → GND
+Černá → GND \n
 Červená → 3.3V
 Žlutá → GPIO 4 (+ odpor 4.7kΩ mezi žlutou a 3.3V)
 
